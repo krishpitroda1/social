@@ -1,0 +1,137 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SubscriptionPlan {
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+enum SocialPlatform {
+  INSTAGRAM
+  LINKEDIN
+  TWITTER_X
+  FACEBOOK
+  PINTEREST
+}
+
+enum ConnectionStatus {
+  CONNECTED
+  DISCONNECTED
+  EXPIRED
+}
+
+enum PostStatus {
+  DRAFT
+  APPROVED
+  SCHEDULED
+  PUBLISHED
+  FAILED
+}
+
+enum AspectRatio {
+  SQUARE_1_1      // Instagram Feed, LinkedIn Feed
+  PORTRAIT_4_5    // Instagram Portrait
+  STORY_9_16      // Instagram Reel/Story, TikTok
+  LANDSCAPE_16_9  // Twitter/X, LinkedIn Banner
+}
+
+model Organization {
+  id              String            @id @default(uuid())
+  name            String
+  slug            String            @unique
+  plan            SubscriptionPlan  @default(ENTERPRISE)
+  replicateApiKey String?
+  openaiApiKey    String?
+  ayrshareApiKey  String?
+  bufferToken     String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  subsidiaries    Subsidiary[]
+
+  @@map("organizations")
+}
+
+model Subsidiary {
+  id              String            @id @default(uuid())
+  organizationId  String
+  name            String
+  slug            String            @unique
+  tagline         String?
+  brandTone       String            // e.g., "Bold & Disruptive", "Sophisticated Luxury", "Friendly & Empathetic"
+  toneKeywords    String[]          // e.g. ["innovative", "sleek", "modern"]
+  primaryColor    String            // Hex code: #6366F1
+  secondaryColor  String            // Hex code: #EC4899
+  accentColor     String?           // Hex code: #10B981
+  logoUrl         String
+  websiteUrl      String?
+  targetAudience  String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  organization    Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  socialAccounts  SocialAccount[]
+  posts           ScheduledPost[]
+
+  @@map("subsidiaries")
+}
+
+model SocialAccount {
+  id              String            @id @default(uuid())
+  subsidiaryId    String
+  platform        SocialPlatform
+  accountHandle   String
+  accountName     String
+  avatarUrl       String?
+  followersCount  Int               @default(0)
+  connectionStatus ConnectionStatus @default(CONNECTED)
+  lastSyncedAt    DateTime          @default(now())
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  subsidiary      Subsidiary        @relation(fields: [subsidiaryId], references: [id], onDelete: Cascade)
+  posts           ScheduledPost[]
+
+  @@unique([subsidiaryId, platform])
+  @@map("social_accounts")
+}
+
+model ScheduledPost {
+  id                String            @id @default(uuid())
+  subsidiaryId      String
+  socialAccountId   String?
+  platform          SocialPlatform
+  prompt            String
+  enhancedPrompt    String?
+  imageUrl          String
+  aspectRatio       AspectRatio       @default(SQUARE_1_1)
+  caption           String
+  hashtags          String[]
+  status            PostStatus        @default(DRAFT)
+  modelName         String            @default("Flux.1-Pro") // Flux.1-Pro, DALL-E-3, SDXL-Turbo
+  scheduledTime     DateTime?
+  publishedTime     DateTime?
+  rejectionFeedback String?
+  metricsLikes      Int               @default(0)
+  metricsComments   Int               @default(0)
+  metricsShares     Int               @default(0)
+  metricsImpressions Int              @default(0)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  subsidiary        Subsidiary        @relation(fields: [subsidiaryId], references: [id], onDelete: Cascade)
+  socialAccount     SocialAccount?    @relation(fields: [socialAccountId], references: [id], onDelete: SetNull)
+
+  @@map("scheduled_posts")
+}
+
