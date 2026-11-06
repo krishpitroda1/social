@@ -19,7 +19,7 @@ import {
 import { enhancePromptWithBrandTone, generateBrandCaption, generateVisualEngine } from '@/lib/ai-engine';
 import { formatAyrsharePayload, formatBufferPayload, dispatchToSocialConnector } from '@/lib/social-connectors';
 
-const STORAGE_KEY = 'omnibrand_studio_state_v3';
+const STORAGE_KEY = 'omnibrand_studio_state_v4';
 
 function loadSavedState(): {
   organization?: Organization;
@@ -62,6 +62,57 @@ function saveStateToStorage(state: {
   } catch (e) {
     console.warn('Failed to save state to localStorage:', e);
   }
+}
+
+// Background sync helpers with server persistent database (data/db.json)
+function syncSubsidiaryToServer(sub: Subsidiary, method: 'PUT' | 'POST') {
+  if (typeof window === 'undefined') return;
+  fetch('/api/subsidiaries', {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sub),
+  }).catch((err) => console.warn('[server-db] Sync subsidiary error:', err));
+}
+
+function deleteSubsidiaryFromServer(id: string) {
+  if (typeof window === 'undefined') return;
+  fetch(`/api/subsidiaries?id=${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  }).catch((err) => console.warn('[server-db] Delete subsidiary error:', err));
+}
+
+function syncOrganizationToServer(org: Organization) {
+  if (typeof window === 'undefined') return;
+  fetch('/api/organization', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(org),
+  }).catch((err) => console.warn('[server-db] Sync organization error:', err));
+}
+
+function syncSocialAccountToServer(account: SocialAccount) {
+  if (typeof window === 'undefined') return;
+  fetch('/api/social-accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(account),
+  }).catch((err) => console.warn('[server-db] Sync social account error:', err));
+}
+
+function syncPostToServer(post: ScheduledPost) {
+  if (typeof window === 'undefined') return;
+  fetch('/api/posts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(post),
+  }).catch((err) => console.warn('[server-db] Sync post error:', err));
+}
+
+function deletePostFromServer(id: string) {
+  if (typeof window === 'undefined') return;
+  fetch(`/api/posts?id=${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  }).catch((err) => console.warn('[server-db] Delete post error:', err));
 }
 
 interface StudioState {
@@ -171,76 +222,129 @@ interface StudioState {
   resetToDefaults: () => void;
 }
 
-export const useStudioStore = create<StudioState>((set, get) => ({
-  organization: mockOrganization,
-  subsidiaries: mockSubsidiaries,
-  selectedSubsidiary: mockSubsidiaries[0],
-  editingSubsidiary: null,
-  isEditSubsidiaryModalOpen: false,
-  isEditOrgModalOpen: false,
+export const useStudioStore = create<StudioState>((set, get) => {
+  const initialLocal = typeof window !== 'undefined' ? loadSavedState() : {};
+  const initialSubs =
+    initialLocal.subsidiaries && initialLocal.subsidiaries.length > 0
+      ? initialLocal.subsidiaries
+      : mockSubsidiaries;
+  const initialOrg = initialLocal.organization || mockOrganization;
+  const initialSelected =
+    initialLocal.selectedSubsidiary && initialSubs.some((s) => s.id === initialLocal.selectedSubsidiary?.id)
+      ? initialLocal.selectedSubsidiary
+      : initialSubs[0];
+  const initialAccounts = initialLocal.socialAccounts || mockSocialAccounts;
+  const initialPosts = initialLocal.posts || mockPosts;
 
-  socialAccounts: mockSocialAccounts,
-  isConnectAccountModalOpen: false,
-  connectingPlatform: null,
+  return {
+    organization: initialOrg,
+    subsidiaries: initialSubs,
+    selectedSubsidiary: initialSelected,
+    editingSubsidiary: null,
+    isEditSubsidiaryModalOpen: false,
+    isEditOrgModalOpen: false,
 
-  currentStep: 1,
-  activeTab: 'studio',
-  theme: 'dark',
-  isSettingsOpen: false,
+    socialAccounts: initialAccounts,
+    isConnectAccountModalOpen: false,
+    connectingPlatform: null,
 
-  selectedPlatform: 'INSTAGRAM',
-  aspectRatio: '1:1',
-  prompt: 'A sleek luxury perfume bottle resting on black obsidian stone in morning golden light',
-  enhancedPrompt: '',
-  enhanceWithBrandTone: true,
-  // Default to ChatGPT's engine (DALL-E 3)
-  selectedModel: 'DALL-E-3',
-  caption: '',
-  hashtags: [],
+    currentStep: 1,
+    activeTab: 'studio',
+    theme: 'dark',
+    isSettingsOpen: false,
 
-  isGenerating: false,
-  generationError: null,
-  generatedImageUrl: null,
-  generatedSeed: null,
-  rejectionFeedback: '',
-  revisionHistory: [],
-  isApproved: false,
+    selectedPlatform: 'INSTAGRAM',
+    aspectRatio: '1:1',
+    prompt: 'A sleek luxury perfume bottle resting on black obsidian stone in morning golden light',
+    enhancedPrompt: '',
+    enhanceWithBrandTone: true,
+    // Default to ChatGPT's engine (DALL-E 3)
+    selectedModel: 'DALL-E-3',
+    caption: '',
+    hashtags: [],
 
-  scheduledTime: new Date(Date.now() + 86400000).toISOString().slice(0, 16),
-  postNow: false,
-  isPublishing: false,
-  publishSuccess: false,
-  lastPublishedPostId: null,
-  lastDispatchResult: null,
+    isGenerating: false,
+    generationError: null,
+    generatedImageUrl: null,
+    generatedSeed: null,
+    rejectionFeedback: '',
+    revisionHistory: [],
+    isApproved: false,
 
-  posts: mockPosts,
-  filterStatus: 'ALL',
-  filterPlatform: 'ALL',
-  filterBrandId: 'ALL',
+    scheduledTime: new Date(Date.now() + 86400000).toISOString().slice(0, 16),
+    postNow: false,
+    isPublishing: false,
+    publishSuccess: false,
+    lastPublishedPostId: null,
+    lastDispatchResult: null,
 
-  hydrateFromStorage: () => {
-    const saved = loadSavedState();
-    if (Object.keys(saved).length > 0) {
-      set((state) => {
-        const subs = saved.subsidiaries && saved.subsidiaries.length > 0 ? saved.subsidiaries : state.subsidiaries;
-        const org = saved.organization || state.organization;
-        const selected =
-          saved.selectedSubsidiary && subs.some((s) => s.id === saved.selectedSubsidiary?.id)
-            ? saved.selectedSubsidiary
-            : subs[0];
-        const accounts = saved.socialAccounts || state.socialAccounts;
-        const p = saved.posts || state.posts;
+    posts: initialPosts,
+    filterStatus: 'ALL',
+    filterPlatform: 'ALL',
+    filterBrandId: 'ALL',
 
-        return {
-          subsidiaries: subs,
-          organization: org,
-          selectedSubsidiary: selected,
-          socialAccounts: accounts,
-          posts: p,
-        };
-      });
-    }
-  },
+    hydrateFromStorage: async () => {
+      // 1. Instant client-side hydration from localStorage
+      const saved = loadSavedState();
+      if (Object.keys(saved).length > 0) {
+        set((state) => {
+          const subs = saved.subsidiaries && saved.subsidiaries.length > 0 ? saved.subsidiaries : state.subsidiaries;
+          const org = saved.organization || state.organization;
+          const selected =
+            saved.selectedSubsidiary && subs.some((s) => s.id === saved.selectedSubsidiary?.id)
+              ? saved.selectedSubsidiary
+              : subs[0];
+          const accounts = saved.socialAccounts || state.socialAccounts;
+          const p = saved.posts || state.posts;
+
+          return {
+            subsidiaries: subs,
+            organization: org,
+            selectedSubsidiary: selected,
+            socialAccounts: accounts,
+            posts: p,
+          };
+        });
+      }
+
+      // 2. Reconcile with ground-truth persistent server database (/api/bootstrap)
+      try {
+        const res = await fetch('/api/bootstrap');
+        const json = await res.json();
+        if (json.success && json.data) {
+          const { organization, subsidiaries, socialAccounts, posts } = json.data;
+
+          set((state) => {
+            const subs = subsidiaries && subsidiaries.length > 0 ? subsidiaries : state.subsidiaries;
+            const org = organization || state.organization;
+            const selected =
+              state.selectedSubsidiary && subs.some((s: Subsidiary) => s.id === state.selectedSubsidiary?.id)
+                ? subs.find((s: Subsidiary) => s.id === state.selectedSubsidiary?.id)
+                : subs[0];
+            const accounts = socialAccounts || state.socialAccounts;
+            const p = posts || state.posts;
+
+            saveStateToStorage({
+              organization: org,
+              subsidiaries: subs,
+              selectedSubsidiary: selected,
+              socialAccounts: accounts,
+              posts: p,
+            });
+
+            return {
+              subsidiaries: subs,
+              organization: org,
+              selectedSubsidiary: selected,
+              socialAccounts: accounts,
+              posts: p,
+            };
+          });
+        }
+      } catch (e) {
+        console.warn('[store] Server DB sync offline, using local cache:', e);
+      }
+    },
 
   setStep: (step) => set({ currentStep: step }),
   nextStep: () => set((state) => ({ currentStep: Math.min(state.currentStep + 1, 5) })),
@@ -312,6 +416,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         socialAccounts: state.socialAccounts,
         posts: state.posts,
       });
+      syncOrganizationToServer(updatedOrg);
       return { organization: updatedOrg };
     });
   },
@@ -326,6 +431,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         socialAccounts: state.socialAccounts,
         posts: state.posts,
       });
+      syncOrganizationToServer(updatedOrg);
       return { organization: updatedOrg };
     });
   },
@@ -343,15 +449,18 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       );
 
       let updatedAccounts = [...state.socialAccounts];
+      let targetAccount: SocialAccount;
+
       if (existingIndex >= 0) {
-        updatedAccounts[existingIndex] = {
+        targetAccount = {
           ...updatedAccounts[existingIndex],
           ...data,
           connectionStatus: 'CONNECTED',
           lastSyncedAt: new Date().toISOString(),
         };
+        updatedAccounts[existingIndex] = targetAccount;
       } else {
-        const newAccount: SocialAccount = {
+        targetAccount = {
           id: `soc-${Date.now()}`,
           subsidiaryId,
           platform,
@@ -363,7 +472,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           lastSyncedAt: new Date().toISOString(),
           profileKey: data.profileKey,
         };
-        updatedAccounts.push(newAccount);
+        updatedAccounts.push(targetAccount);
       }
 
       const activeCount = updatedAccounts.filter(
@@ -386,6 +495,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         socialAccounts: updatedAccounts,
         posts: state.posts,
       });
+
+      syncSocialAccountToServer(targetAccount);
 
       return {
         socialAccounts: updatedAccounts,
@@ -643,6 +754,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         socialAccounts: state.socialAccounts,
         posts: updatedPosts,
       });
+      deletePostFromServer(id);
       return { posts: updatedPosts };
     });
   },
@@ -661,6 +773,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         posts: state.posts,
       });
 
+      // Permanent background sync to server database (data/db.json)
+      syncSubsidiaryToServer(updated, 'PUT');
+
       return {
         subsidiaries: updatedSubs,
         selectedSubsidiary: updatedSelected,
@@ -678,6 +793,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         socialAccounts: state.socialAccounts,
         posts: state.posts,
       });
+
+      // Permanent background sync to server database (data/db.json)
+      syncSubsidiaryToServer(newBrand, 'POST');
 
       return {
         subsidiaries: updatedSubs,
@@ -702,6 +820,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         posts: state.posts,
       });
 
+      // Permanent background sync to server database (data/db.json)
+      deleteSubsidiaryFromServer(id);
+
       return {
         subsidiaries: remaining,
         selectedSubsidiary: updatedSelected,
@@ -720,6 +841,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         posts: state.posts,
       });
 
+      // Permanent background sync to server database (data/db.json)
+      syncOrganizationToServer(updatedOrg);
+
       return {
         organization: updatedOrg,
       };
@@ -729,6 +853,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   resetToDefaults: () => {
     if (typeof window !== 'undefined') {
       localStorage.removeItem(STORAGE_KEY);
+      fetch('/api/bootstrap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'RESET_TO_DEFAULTS' }),
+      }).catch((e) => console.warn('Failed to reset server database:', e));
     }
     set({
       organization: mockOrganization,
@@ -738,4 +867,5 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       posts: mockPosts,
     });
   },
-}));
+};
+});

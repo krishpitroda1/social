@@ -1,39 +1,46 @@
 import { NextResponse } from 'next/server';
-import { mockPosts } from '@/lib/mock-data';
+import { getDbPosts, addDbPost, deleteDbPost } from '@/lib/server-db';
 import { ScheduledPost } from '@/types';
 
-let posts: ScheduledPost[] = [...mockPosts];
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const brandId = searchParams.get('brandId');
-  const status = searchParams.get('status');
-  const platform = searchParams.get('platform');
+  try {
+    const { searchParams } = new URL(request.url);
+    const brandId = searchParams.get('brandId');
+    const status = searchParams.get('status');
+    const platform = searchParams.get('platform');
 
-  let filtered = [...posts];
+    let filtered = await getDbPosts();
 
-  if (brandId && brandId !== 'ALL') {
-    filtered = filtered.filter((p) => p.subsidiaryId === brandId);
-  }
-  if (status && status !== 'ALL') {
-    filtered = filtered.filter((p) => p.status === status);
-  }
-  if (platform && platform !== 'ALL') {
-    filtered = filtered.filter((p) => p.platform === platform);
-  }
+    if (brandId && brandId !== 'ALL') {
+      filtered = filtered.filter((p) => p.subsidiaryId === brandId);
+    }
+    if (status && status !== 'ALL') {
+      filtered = filtered.filter((p) => p.status === status);
+    }
+    if (platform && platform !== 'ALL') {
+      filtered = filtered.filter((p) => p.platform === platform);
+    }
 
-  return NextResponse.json({
-    success: true,
-    total: filtered.length,
-    data: filtered,
-  });
+    return NextResponse.json({
+      success: true,
+      total: filtered.length,
+      data: filtered,
+    });
+  } catch (error: any) {
+    return NextResponse.json(
+      { success: false, error: error.message || 'Failed to fetch posts' },
+      { status: 500 }
+    );
+  }
 }
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const newPost: ScheduledPost = {
-      id: `post-${Date.now()}`,
+      id: body.id || `post-${Date.now()}`,
       subsidiaryId: body.subsidiaryId,
       platform: body.platform,
       prompt: body.prompt,
@@ -54,11 +61,11 @@ export async function POST(request: Request) {
       updatedAt: new Date().toISOString(),
     };
 
-    posts.unshift(newPost);
+    const saved = await addDbPost(newPost);
 
     return NextResponse.json({
       success: true,
-      data: newPost,
+      data: saved,
     });
   } catch (error: any) {
     return NextResponse.json(
@@ -69,15 +76,23 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const id = searchParams.get('id');
+  try {
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get('id');
 
-  if (!id) {
-    return NextResponse.json({ success: false, error: 'Missing post id' }, { status: 400 });
+    if (!id) {
+      return NextResponse.json({ success: false, error: 'Missing post id' }, { status: 400 });
+    }
+
+    const deleted = await deleteDbPost(id);
+    return NextResponse.json({
+      success: deleted,
+      message: deleted ? 'Post deleted successfully' : 'Post not found',
+    });
+  } catch (error: any) {
+    return NextResponse.json(
+      { success: false, error: error.message || 'Failed to delete post' },
+      { status: 500 }
+    );
   }
-
-  posts = posts.filter((p) => p.id !== id);
-
-  return NextResponse.json({ success: true, message: 'Post deleted successfully' });
 }
-
