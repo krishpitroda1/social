@@ -22,11 +22,10 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     if (body.action === 'RESET_TO_DEFAULTS') {
-      const resetData = await resetDbToDefaults();
+      await resetDbToDefaults();
       return NextResponse.json({
         success: true,
         message: 'Database reset to factory defaults',
-        data: resetData,
       });
     }
 
@@ -38,3 +37,4 @@ export async function POST(request: Request) {
     );
   }
 }
+

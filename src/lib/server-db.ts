@@ -1,5 +1,21 @@
-import fs from 'fs';
-import path from 'path';
+/**
+ * server-db.ts — Prisma-backed database layer (Neon Postgres / any PostgreSQL)
+ *
+ * All data is stored in a real external database, so changes persist across
+ * devices, deployments, and serverless cold-starts.
+ *
+ * Required env variable:
+ *   DATABASE_URL = postgresql://user:pass@host/db?sslmode=require
+ *
+ * Quick start (Neon free tier):
+ *   1. https://neon.tech → create project → copy connection string
+ *   2. Paste into .env.local as DATABASE_URL
+ *   3. npx prisma db push          (creates tables)
+ *   4. npx prisma db seed          (seeds mock data)
+ *   5. Add DATABASE_URL to Vercel environment variables → redeploy
+ */
+
+import { prisma } from '@/lib/prisma';
 import { Organization, Subsidiary, SocialAccount, ScheduledPost } from '@/types';
 import {
   mockOrganization,
@@ -8,185 +24,489 @@ import {
   mockPosts,
 } from '@/lib/mock-data';
 
-interface DatabaseSchema {
-  organization: Organization;
-  subsidiaries: Subsidiary[];
-  socialAccounts: SocialAccount[];
-  posts: ScheduledPost[];
-  updatedAt: string;
+// ----------------------------------------------------------------
+// Helpers — convert Prisma rows → app types
+// ----------------------------------------------------------------
+
+type PrismaAspectRatio = 'SQUARE_1_1' | 'PORTRAIT_4_5' | 'STORY_9_16' | 'LANDSCAPE_16_9';
+
+function toDbAspectRatio(ar: string): PrismaAspectRatio {
+  const map: Record<string, PrismaAspectRatio> = {
+    '1:1': 'SQUARE_1_1',
+    '4:5': 'PORTRAIT_4_5',
+    '9:16': 'STORY_9_16',
+    '16:9': 'LANDSCAPE_16_9',
+    // also handle if already in DB format
+    'SQUARE_1_1': 'SQUARE_1_1',
+    'PORTRAIT_4_5': 'PORTRAIT_4_5',
+    'STORY_9_16': 'STORY_9_16',
+    'LANDSCAPE_16_9': 'LANDSCAPE_16_9',
+  };
+  return map[ar] ?? 'SQUARE_1_1';
 }
 
-const DB_DIR = path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DB_DIR, 'db.json');
+function fromDbAspectRatio(ar: string): ScheduledPost['aspectRatio'] {
+  const map: Record<string, ScheduledPost['aspectRatio']> = {
+    'SQUARE_1_1': '1:1',
+    'PORTRAIT_4_5': '4:5',
+    'STORY_9_16': '9:16',
+    'LANDSCAPE_16_9': '16:9',
+    // passthrough if already in app format
+    '1:1': '1:1',
+    '4:5': '4:5',
+    '9:16': '9:16',
+    '16:9': '16:9',
+  };
+  return map[ar] ?? '1:1';
+}
 
-// Memory cache for serverless runtimes
-let memoryCache: DatabaseSchema | null = null;
-
-function getInitialData(): DatabaseSchema {
+function mapOrg(row: {
+  id: string;
+  name: string;
+  slug: string;
+  plan: string;
+  replicateApiKey: string | null;
+  openaiApiKey: string | null;
+  ayrshareApiKey: string | null;
+  bufferToken: string | null;
+}): Organization {
   return {
-    organization: mockOrganization,
-    subsidiaries: mockSubsidiaries,
-    socialAccounts: mockSocialAccounts,
-    posts: mockPosts,
-    updatedAt: new Date().toISOString(),
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    plan: row.plan as Organization['plan'],
+    replicateApiKey: row.replicateApiKey ?? undefined,
+    openaiApiKey: row.openaiApiKey ?? undefined,
+    ayrshareApiKey: row.ayrshareApiKey ?? undefined,
+    bufferToken: row.bufferToken ?? undefined,
   };
 }
 
-export async function readDatabase(): Promise<DatabaseSchema> {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const content = await fs.promises.readFile(DB_FILE, 'utf-8');
-      const parsed = JSON.parse(content) as DatabaseSchema;
-      memoryCache = parsed;
-      return parsed;
-    }
-  } catch (err) {
-    console.warn('[server-db] Failed to read db.json, checking memory cache or initializing:', err);
-  }
-
-  if (memoryCache) {
-    return memoryCache;
-  }
-
-  const initial = getInitialData();
-  await writeDatabase(initial);
-  return initial;
+function mapSub(row: {
+  id: string;
+  organizationId: string;
+  name: string;
+  slug: string;
+  tagline: string | null;
+  brandTone: string;
+  toneKeywords: string[];
+  primaryColor: string;
+  secondaryColor: string;
+  accentColor: string | null;
+  logoUrl: string;
+  websiteUrl: string | null;
+  targetAudience: string | null;
+  _count?: { socialAccounts: number };
+}): Subsidiary {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    name: row.name,
+    slug: row.slug,
+    tagline: row.tagline ?? '',
+    brandTone: row.brandTone,
+    toneKeywords: row.toneKeywords,
+    primaryColor: row.primaryColor,
+    secondaryColor: row.secondaryColor,
+    accentColor: row.accentColor ?? '',
+    logoUrl: row.logoUrl,
+    websiteUrl: row.websiteUrl ?? '',
+    targetAudience: row.targetAudience ?? '',
+    activeAccountsCount: row._count?.socialAccounts ?? 0,
+  };
 }
 
-export async function writeDatabase(data: DatabaseSchema): Promise<void> {
-  memoryCache = data;
-  data.updatedAt = new Date().toISOString();
+function mapAccount(row: {
+  id: string;
+  subsidiaryId: string;
+  platform: string;
+  accountHandle: string;
+  accountName: string;
+  avatarUrl: string | null;
+  followersCount: number;
+  connectionStatus: string;
+  lastSyncedAt: Date;
+}): SocialAccount {
+  return {
+    id: row.id,
+    subsidiaryId: row.subsidiaryId,
+    platform: row.platform as SocialAccount['platform'],
+    accountHandle: row.accountHandle,
+    accountName: row.accountName,
+    avatarUrl: row.avatarUrl ?? '',
+    followersCount: row.followersCount,
+    connectionStatus: row.connectionStatus as SocialAccount['connectionStatus'],
+    lastSyncedAt: row.lastSyncedAt.toISOString(),
+  };
+}
 
-  try {
-    if (!fs.existsSync(DB_DIR)) {
-      await fs.promises.mkdir(DB_DIR, { recursive: true });
-    }
-    const tempFile = `${DB_FILE}.tmp.${Date.now()}`;
-    await fs.promises.writeFile(tempFile, JSON.stringify(data, null, 2), 'utf-8');
-    await fs.promises.rename(tempFile, DB_FILE);
-  } catch (err) {
-    console.error('[server-db] Failed to write db.json to disk (falling back to memory):', err);
+function mapPost(row: {
+  id: string;
+  subsidiaryId: string;
+  socialAccountId: string | null;
+  platform: string;
+  prompt: string;
+  enhancedPrompt: string | null;
+  imageUrl: string;
+  aspectRatio: string;
+  caption: string;
+  hashtags: string[];
+  status: string;
+  modelName: string;
+  scheduledTime: Date | null;
+  publishedTime: Date | null;
+  rejectionFeedback: string | null;
+  metricsLikes: number;
+  metricsComments: number;
+  metricsShares: number;
+  metricsImpressions: number;
+  createdAt: Date;
+  updatedAt?: Date;
+}): ScheduledPost {
+  return {
+    id: row.id,
+    subsidiaryId: row.subsidiaryId,
+    socialAccountId: row.socialAccountId ?? undefined,
+    platform: row.platform as ScheduledPost['platform'],
+    prompt: row.prompt,
+    enhancedPrompt: row.enhancedPrompt ?? undefined,
+    imageUrl: row.imageUrl,
+    aspectRatio: fromDbAspectRatio(row.aspectRatio),
+    caption: row.caption,
+    hashtags: row.hashtags,
+    status: row.status as ScheduledPost['status'],
+    modelName: row.modelName as ScheduledPost['modelName'],
+    scheduledTime: row.scheduledTime?.toISOString(),
+    publishedTime: row.publishedTime?.toISOString(),
+    rejectionFeedback: row.rejectionFeedback ?? undefined,
+    metricsLikes: row.metricsLikes,
+    metricsComments: row.metricsComments,
+    metricsShares: row.metricsShares,
+    metricsImpressions: row.metricsImpressions,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt?.toISOString() ?? row.createdAt.toISOString(),
+  };
+}
+
+// ----------------------------------------------------------------
+// DB health check — ensure at least one org exists (auto-seed if empty)
+// ----------------------------------------------------------------
+async function ensureSeeded() {
+  const count = await prisma.organization.count();
+  if (count === 0) {
+    await seedDatabase();
   }
 }
 
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 // Organization Operations
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 export async function getDbOrganization(): Promise<Organization> {
-  const db = await readDatabase();
-  return db.organization;
+  await ensureSeeded();
+  const row = await prisma.organization.findFirst();
+  if (!row) throw new Error('No organization found');
+  return mapOrg(row);
 }
 
 export async function updateDbOrganization(updates: Partial<Organization>): Promise<Organization> {
-  const db = await readDatabase();
-  db.organization = {
-    ...db.organization,
-    ...updates,
-  };
-  await writeDatabase(db);
-  return db.organization;
+  await ensureSeeded();
+  const existing = await prisma.organization.findFirst();
+  if (!existing) throw new Error('No organization found');
+
+  const updated = await prisma.organization.update({
+    where: { id: existing.id },
+    data: {
+      name: updates.name ?? existing.name,
+      slug: updates.slug ?? existing.slug,
+      plan: (updates.plan ?? existing.plan) as 'STARTER' | 'PRO' | 'ENTERPRISE',
+      replicateApiKey: updates.replicateApiKey ?? existing.replicateApiKey,
+      openaiApiKey: updates.openaiApiKey ?? existing.openaiApiKey,
+      ayrshareApiKey: updates.ayrshareApiKey ?? existing.ayrshareApiKey,
+      bufferToken: updates.bufferToken ?? existing.bufferToken,
+    },
+  });
+  return mapOrg(updated);
 }
 
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 // Subsidiary Operations
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 export async function getDbSubsidiaries(): Promise<Subsidiary[]> {
-  const db = await readDatabase();
-  return db.subsidiaries;
+  await ensureSeeded();
+  const rows = await prisma.subsidiary.findMany({
+    include: { _count: { select: { socialAccounts: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  return rows.map(mapSub);
 }
 
 export async function updateDbSubsidiary(updated: Subsidiary): Promise<Subsidiary> {
-  const db = await readDatabase();
-  const index = db.subsidiaries.findIndex((s) => s.id === updated.id);
+  const existing = await prisma.subsidiary.findUnique({ where: { id: updated.id } });
 
-  if (index >= 0) {
-    db.subsidiaries[index] = { ...db.subsidiaries[index], ...updated };
-  } else {
-    db.subsidiaries.push(updated);
+  if (!existing) {
+    return addDbSubsidiary(updated);
   }
 
-  await writeDatabase(db);
-  return updated;
+  const row = await prisma.subsidiary.update({
+    where: { id: updated.id },
+    data: {
+      name: updated.name,
+      slug: updated.slug,
+      tagline: updated.tagline ?? null,
+      brandTone: updated.brandTone,
+      toneKeywords: updated.toneKeywords,
+      primaryColor: updated.primaryColor,
+      secondaryColor: updated.secondaryColor,
+      accentColor: updated.accentColor ?? null,
+      logoUrl: updated.logoUrl,
+      websiteUrl: updated.websiteUrl ?? null,
+      targetAudience: updated.targetAudience ?? null,
+    },
+    include: { _count: { select: { socialAccounts: true } } },
+  });
+  return mapSub(row);
 }
 
 export async function addDbSubsidiary(newSub: Subsidiary): Promise<Subsidiary> {
-  const db = await readDatabase();
-  const exists = db.subsidiaries.some((s) => s.id === newSub.id);
-  if (!exists) {
-    db.subsidiaries.push(newSub);
-  }
-  await writeDatabase(db);
-  return newSub;
+  // Ensure the parent org exists
+  await ensureSeeded();
+  const org = await prisma.organization.findFirst();
+  if (!org) throw new Error('No organization found');
+
+  const row = await prisma.subsidiary.upsert({
+    where: { id: newSub.id },
+    create: {
+      id: newSub.id,
+      organizationId: org.id,
+      name: newSub.name,
+      slug: newSub.slug,
+      tagline: newSub.tagline ?? null,
+      brandTone: newSub.brandTone,
+      toneKeywords: newSub.toneKeywords,
+      primaryColor: newSub.primaryColor,
+      secondaryColor: newSub.secondaryColor,
+      accentColor: newSub.accentColor ?? null,
+      logoUrl: newSub.logoUrl,
+      websiteUrl: newSub.websiteUrl ?? null,
+      targetAudience: newSub.targetAudience ?? null,
+    },
+    update: {
+      name: newSub.name,
+      slug: newSub.slug,
+      tagline: newSub.tagline ?? null,
+      brandTone: newSub.brandTone,
+    },
+    include: { _count: { select: { socialAccounts: true } } },
+  });
+  return mapSub(row);
 }
 
 export async function deleteDbSubsidiary(id: string): Promise<boolean> {
-  const db = await readDatabase();
-  const initialLength = db.subsidiaries.length;
-  db.subsidiaries = db.subsidiaries.filter((s) => s.id !== id);
-  db.socialAccounts = db.socialAccounts.filter((a) => a.subsidiaryId !== id);
-  db.posts = db.posts.filter((p) => p.subsidiaryId !== id);
-
-  await writeDatabase(db);
-  return db.subsidiaries.length < initialLength;
+  try {
+    await prisma.subsidiary.delete({ where: { id } });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 // Social Account Operations
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 export async function updateDbSocialAccount(account: SocialAccount): Promise<SocialAccount> {
-  const db = await readDatabase();
-  const index = db.socialAccounts.findIndex(
-    (a) => a.subsidiaryId === account.subsidiaryId && a.platform === account.platform
-  );
-
-  if (index >= 0) {
-    db.socialAccounts[index] = { ...db.socialAccounts[index], ...account };
-  } else {
-    db.socialAccounts.push(account);
-  }
-
-  // Update activeAccountsCount on subsidiary
-  const activeCount = db.socialAccounts.filter(
-    (a) => a.subsidiaryId === account.subsidiaryId && a.connectionStatus === 'CONNECTED'
-  ).length;
-
-  const subIndex = db.subsidiaries.findIndex((s) => s.id === account.subsidiaryId);
-  if (subIndex >= 0) {
-    db.subsidiaries[subIndex].activeAccountsCount = activeCount;
-  }
-
-  await writeDatabase(db);
-  return account;
+  const row = await prisma.socialAccount.upsert({
+    where: {
+      subsidiaryId_platform: {
+        subsidiaryId: account.subsidiaryId,
+        platform: account.platform as 'INSTAGRAM' | 'LINKEDIN' | 'TWITTER_X' | 'FACEBOOK' | 'PINTEREST',
+      },
+    },
+    create: {
+      id: account.id,
+      subsidiaryId: account.subsidiaryId,
+      platform: account.platform as 'INSTAGRAM' | 'LINKEDIN' | 'TWITTER_X' | 'FACEBOOK' | 'PINTEREST',
+      accountHandle: account.accountHandle,
+      accountName: account.accountName,
+      avatarUrl: account.avatarUrl ?? null,
+      followersCount: account.followersCount,
+      connectionStatus: account.connectionStatus as 'CONNECTED' | 'DISCONNECTED' | 'EXPIRED',
+      lastSyncedAt: account.lastSyncedAt ? new Date(account.lastSyncedAt) : new Date(),
+    },
+    update: {
+      accountHandle: account.accountHandle,
+      accountName: account.accountName,
+      avatarUrl: account.avatarUrl ?? null,
+      followersCount: account.followersCount,
+      connectionStatus: account.connectionStatus as 'CONNECTED' | 'DISCONNECTED' | 'EXPIRED',
+      lastSyncedAt: account.lastSyncedAt ? new Date(account.lastSyncedAt) : new Date(),
+    },
+  });
+  return mapAccount(row);
 }
 
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 // Scheduled Post Operations
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 export async function getDbPosts(): Promise<ScheduledPost[]> {
-  const db = await readDatabase();
-  return db.posts;
+  const rows = await prisma.scheduledPost.findMany({
+    orderBy: { createdAt: 'desc' },
+  });
+  return rows.map(mapPost);
 }
 
 export async function addDbPost(newPost: ScheduledPost): Promise<ScheduledPost> {
-  const db = await readDatabase();
-  db.posts.unshift(newPost);
-  await writeDatabase(db);
-  return newPost;
+  const row = await prisma.scheduledPost.create({
+    data: {
+      id: newPost.id,
+      subsidiaryId: newPost.subsidiaryId,
+      socialAccountId: newPost.socialAccountId ?? null,
+      platform: newPost.platform as 'INSTAGRAM' | 'LINKEDIN' | 'TWITTER_X' | 'FACEBOOK' | 'PINTEREST',
+      prompt: newPost.prompt,
+      enhancedPrompt: newPost.enhancedPrompt ?? null,
+      imageUrl: newPost.imageUrl,
+      aspectRatio: toDbAspectRatio(newPost.aspectRatio ?? '1:1'),
+      caption: newPost.caption,
+      hashtags: newPost.hashtags,
+      status: (newPost.status ?? 'DRAFT') as 'DRAFT' | 'APPROVED' | 'SCHEDULED' | 'PUBLISHED' | 'FAILED',
+      modelName: newPost.modelName ?? 'Flux.1-Pro',
+      scheduledTime: newPost.scheduledTime ? new Date(newPost.scheduledTime) : null,
+      publishedTime: newPost.publishedTime ? new Date(newPost.publishedTime) : null,
+      rejectionFeedback: newPost.rejectionFeedback ?? null,
+      metricsLikes: newPost.metricsLikes ?? 0,
+      metricsComments: newPost.metricsComments ?? 0,
+      metricsShares: newPost.metricsShares ?? 0,
+      metricsImpressions: newPost.metricsImpressions ?? 0,
+    },
+  });
+  return mapPost(row);
 }
 
 export async function deleteDbPost(id: string): Promise<boolean> {
-  const db = await readDatabase();
-  const initialLength = db.posts.length;
-  db.posts = db.posts.filter((p) => p.id !== id);
-  await writeDatabase(db);
-  return db.posts.length < initialLength;
+  try {
+    await prisma.scheduledPost.delete({ where: { id } });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-// -------------------------------------------------------------
+// ----------------------------------------------------------------
 // Reset to Defaults (Factory Reset)
-// -------------------------------------------------------------
-export async function resetDbToDefaults(): Promise<DatabaseSchema> {
-  const initial = getInitialData();
-  await writeDatabase(initial);
-  return initial;
+// ----------------------------------------------------------------
+export async function resetDbToDefaults(): Promise<void> {
+  // Clear all data
+  await prisma.scheduledPost.deleteMany();
+  await prisma.socialAccount.deleteMany();
+  await prisma.subsidiary.deleteMany();
+  await prisma.organization.deleteMany();
+  // Re-seed
+  await seedDatabase();
+}
+
+// ----------------------------------------------------------------
+// Seed database with mock data
+// ----------------------------------------------------------------
+export async function seedDatabase(): Promise<void> {
+  // Create organization
+  const org = await prisma.organization.upsert({
+    where: { id: mockOrganization.id },
+    create: {
+      id: mockOrganization.id,
+      name: mockOrganization.name,
+      slug: mockOrganization.slug,
+      plan: mockOrganization.plan as 'STARTER' | 'PRO' | 'ENTERPRISE',
+      replicateApiKey: mockOrganization.replicateApiKey ?? null,
+      openaiApiKey: mockOrganization.openaiApiKey ?? null,
+      ayrshareApiKey: mockOrganization.ayrshareApiKey ?? null,
+      bufferToken: mockOrganization.bufferToken ?? null,
+    },
+    update: {},
+  });
+
+  // Create subsidiaries
+  for (const sub of mockSubsidiaries) {
+    await prisma.subsidiary.upsert({
+      where: { id: sub.id },
+      create: {
+        id: sub.id,
+        organizationId: org.id,
+        name: sub.name,
+        slug: sub.slug,
+        tagline: sub.tagline ?? null,
+        brandTone: sub.brandTone,
+        toneKeywords: sub.toneKeywords,
+        primaryColor: sub.primaryColor,
+        secondaryColor: sub.secondaryColor,
+        accentColor: sub.accentColor ?? null,
+        logoUrl: sub.logoUrl,
+        websiteUrl: sub.websiteUrl ?? null,
+        targetAudience: sub.targetAudience ?? null,
+      },
+      update: {},
+    });
+  }
+
+  // Create social accounts
+  for (const account of mockSocialAccounts) {
+    await prisma.socialAccount.upsert({
+      where: { id: account.id },
+      create: {
+        id: account.id,
+        subsidiaryId: account.subsidiaryId,
+        platform: account.platform as 'INSTAGRAM' | 'LINKEDIN' | 'TWITTER_X' | 'FACEBOOK' | 'PINTEREST',
+        accountHandle: account.accountHandle,
+        accountName: account.accountName,
+        avatarUrl: account.avatarUrl ?? null,
+        followersCount: account.followersCount,
+        connectionStatus: account.connectionStatus as 'CONNECTED' | 'DISCONNECTED' | 'EXPIRED',
+        lastSyncedAt: account.lastSyncedAt ? new Date(account.lastSyncedAt) : new Date(),
+      },
+      update: {},
+    });
+  }
+
+  // Create posts (skip if they have invalid subsidiaryIds)
+  for (const post of mockPosts) {
+    const subExists = await prisma.subsidiary.findUnique({ where: { id: post.subsidiaryId } });
+    if (!subExists) continue;
+
+    await prisma.scheduledPost.upsert({
+      where: { id: post.id },
+      create: {
+        id: post.id,
+        subsidiaryId: post.subsidiaryId,
+        socialAccountId: post.socialAccountId ?? null,
+        platform: post.platform as 'INSTAGRAM' | 'LINKEDIN' | 'TWITTER_X' | 'FACEBOOK' | 'PINTEREST',
+        prompt: post.prompt,
+        enhancedPrompt: post.enhancedPrompt ?? null,
+        imageUrl: post.imageUrl,
+        aspectRatio: toDbAspectRatio(post.aspectRatio ?? '1:1'),
+        caption: post.caption,
+        hashtags: post.hashtags,
+        status: (post.status ?? 'DRAFT') as 'DRAFT' | 'APPROVED' | 'SCHEDULED' | 'PUBLISHED' | 'FAILED',
+        modelName: post.modelName ?? 'Flux.1-Pro',
+        scheduledTime: post.scheduledTime ? new Date(post.scheduledTime) : null,
+        publishedTime: post.publishedTime ? new Date(post.publishedTime) : null,
+        rejectionFeedback: post.rejectionFeedback ?? null,
+        metricsLikes: post.metricsLikes ?? 0,
+        metricsComments: post.metricsComments ?? 0,
+        metricsShares: post.metricsShares ?? 0,
+        metricsImpressions: post.metricsImpressions ?? 0,
+      },
+      update: {},
+    });
+  }
+}
+
+// Legacy compatibility: keep readDatabase / writeDatabase for any routes that call them directly
+export async function readDatabase() {
+  const organization = await getDbOrganization();
+  const subsidiaries = await getDbSubsidiaries();
+  const posts = await getDbPosts();
+  return { organization, subsidiaries, posts, updatedAt: new Date().toISOString() };
+}
+
+// writeDatabase is now a no-op — all mutations go through individual functions above
+export async function writeDatabase(_data: unknown): Promise<void> {
+  // no-op: Prisma handles persistence
 }
