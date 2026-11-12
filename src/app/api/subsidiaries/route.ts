@@ -38,9 +38,7 @@ export async function POST(request: Request) {
       primaryColor: body.primaryColor || '#6366F1',
       secondaryColor: body.secondaryColor || '#EC4899',
       accentColor: body.accentColor || '#10B981',
-      logoUrl:
-        body.logoUrl ||
-        'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80',
+      logoUrl: body.logoUrl !== undefined ? body.logoUrl : '',
       websiteUrl: body.websiteUrl || '',
       targetAudience: body.targetAudience || 'Modern Consumers',
       activeAccountsCount: body.activeAccountsCount || 0,

@@ -250,7 +250,10 @@ export const useStudioStore = create<StudioState>((set, get) => {
 
     currentStep: 1,
     activeTab: 'studio',
-    theme: 'dark',
+    theme:
+      typeof window !== 'undefined' && localStorage.getItem('omnibrand_theme') === 'dark'
+        ? 'dark'
+        : 'light',
     isSettingsOpen: false,
 
     selectedPlatform: 'INSTAGRAM',
@@ -401,8 +404,20 @@ export const useStudioStore = create<StudioState>((set, get) => {
   setScheduledTime: (scheduledTime) => set({ scheduledTime }),
   setPostNow: (postNow) => set({ postNow }),
   setActiveTab: (activeTab) => set({ activeTab }),
-  setTheme: (theme) => set({ theme }),
-  toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
+  setTheme: (theme) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('omnibrand_theme', theme);
+    }
+    set({ theme });
+  },
+  toggleTheme: () =>
+    set((state) => {
+      const nextTheme = state.theme === 'dark' ? 'light' : 'dark';
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('omnibrand_theme', nextTheme);
+      }
+      return { theme: nextTheme };
+    }),
   setSettingsOpen: (isSettingsOpen) => set({ isSettingsOpen }),
   setGenerationError: (generationError) => set({ generationError }),
 

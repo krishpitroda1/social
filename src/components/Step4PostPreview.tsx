@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useStudioStore } from '@/lib/store';
 import { SocialPlatform } from '@/types';
+import { CompanyLogo } from '@/components/CompanyLogo';
 import {
   Heart,
   MessageCircle,
@@ -188,11 +189,14 @@ export const Step4PostPreview: React.FC = () => {
               {/* Instagram Card Header */}
               <div className="flex items-center justify-between p-3.5 border-b border-slate-100 dark:border-neutral-900">
                 <div className="flex items-center space-x-2.5">
-                  <div className="w-8 h-8 rounded-full p-0.5 bg-gradient-to-tr from-amber-500 via-pink-500 to-purple-600">
-                    <img
-                      src={selectedSubsidiary.logoUrl}
-                      alt={selectedSubsidiary.name}
-                      className="w-full h-full rounded-full object-cover border border-white dark:border-black"
+                  <div className="w-8 h-8 rounded-full p-0.5 bg-gradient-to-tr from-amber-500 via-pink-500 to-purple-600 shrink-0">
+                    <CompanyLogo
+                      name={selectedSubsidiary.name}
+                      logoUrl={selectedSubsidiary.logoUrl}
+                      primaryColor={selectedSubsidiary.primaryColor}
+                      secondaryColor={selectedSubsidiary.secondaryColor}
+                      className="w-full h-full rounded-full"
+                      textClassName="text-[10px] font-bold"
                     />
                   </div>
                   <div>
@@ -289,10 +293,13 @@ export const Step4PostPreview: React.FC = () => {
               {/* LinkedIn Header */}
               <div className="p-4 flex items-start justify-between">
                 <div className="flex items-start space-x-3">
-                  <img
-                    src={selectedSubsidiary.logoUrl}
-                    alt={selectedSubsidiary.name}
-                    className="w-12 h-12 rounded object-cover border border-slate-200 dark:border-neutral-700"
+                  <CompanyLogo
+                    name={selectedSubsidiary.name}
+                    logoUrl={selectedSubsidiary.logoUrl}
+                    primaryColor={selectedSubsidiary.primaryColor}
+                    secondaryColor={selectedSubsidiary.secondaryColor}
+                    className="w-12 h-12 rounded-lg"
+                    textClassName="text-sm font-bold"
                   />
                   <div>
                     <h4 className="text-sm font-bold text-slate-900 dark:text-white leading-tight">
@@ -379,10 +386,13 @@ export const Step4PostPreview: React.FC = () => {
           {activeTabPreview === 'TWITTER_X' && (
             <div className="w-full max-w-[480px] rounded-2xl bg-white dark:bg-black border border-slate-200 dark:border-neutral-800 shadow-2xl p-4 transition-all text-slate-900 dark:text-neutral-100 font-sans">
               <div className="flex items-start space-x-3">
-                <img
-                  src={selectedSubsidiary.logoUrl}
-                  alt={selectedSubsidiary.name}
-                  className="w-10 h-10 rounded-full object-cover border border-slate-200 dark:border-neutral-700 shrink-0"
+                <CompanyLogo
+                  name={selectedSubsidiary.name}
+                  logoUrl={selectedSubsidiary.logoUrl}
+                  primaryColor={selectedSubsidiary.primaryColor}
+                  secondaryColor={selectedSubsidiary.secondaryColor}
+                  className="w-10 h-10 rounded-full"
+                  textClassName="text-xs font-bold"
                 />
 
                 <div className="flex-1 min-w-0">

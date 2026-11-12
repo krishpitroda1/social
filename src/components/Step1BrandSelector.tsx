@@ -3,6 +3,7 @@
 import React from 'react';
 import { useStudioStore } from '@/lib/store';
 import { Subsidiary } from '@/types';
+import { CompanyLogo } from '@/components/CompanyLogo';
 import {
   Sparkles,
   ArrowRight,
@@ -112,14 +113,17 @@ export const Step1BrandSelector: React.FC = () => {
 
               {/* Card Header: Logo, Name, Tagline */}
               <div className="flex items-start space-x-4">
-                <div className="relative w-14 h-14 rounded-2xl overflow-hidden bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shrink-0 shadow-sm">
-                  <img
-                    src={sub.logoUrl}
-                    alt={sub.name}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                <div className="relative w-14 h-14 shrink-0">
+                  <CompanyLogo
+                    name={sub.name}
+                    logoUrl={sub.logoUrl}
+                    primaryColor={sub.primaryColor}
+                    secondaryColor={sub.secondaryColor}
+                    className="w-14 h-14 rounded-2xl"
+                    textClassName="text-base font-extrabold"
                   />
                   <div
-                    className="absolute bottom-0 left-0 right-0 h-1"
+                    className="absolute bottom-0 left-0 right-0 h-1 rounded-b-2xl"
                     style={{ backgroundColor: sub.primaryColor }}
                   />
                 </div>
