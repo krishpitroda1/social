@@ -2,18 +2,20 @@
  * server-db.ts — Resilient Multi-Backend Database Layer
  *
  * Supported Backends:
- *   1. PostgreSQL (Supabase / Neon / AWS RDS) via Prisma ORM
- *      - Active when DATABASE_URL is reachable.
+ *   1. Supabase REST API via @supabase/supabase-js
+ *      - Active when NEXT_PUBLIC_SUPABASE_URL + (SUPABASE_SERVICE_ROLE_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY) are set.
+ *      - Uses HTTPS (port 443) — no direct PostgreSQL connection needed.
+ *      - Auto-synchronizes with the 4 tables created by Prisma schema in Supabase.
  *   2. Local Persistent File Database (data/db.json)
- *      - Automatic, zero-config fallback if PostgreSQL is not connected or offline.
+ *      - Automatic, zero-config fallback if Supabase is unreachable or not configured.
  *
  * This dual-engine architecture ensures the app NEVER crashes with a 500 error
- * and your edits are ALWAYS saved locally and synced to PostgreSQL when connected.
+ * and your edits are ALWAYS saved locally and synced to Supabase when connected.
  */
 
 import fs from 'fs';
 import path from 'path';
-import { prisma } from '@/lib/prisma';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Organization, Subsidiary, SocialAccount, ScheduledPost } from '@/types';
 import {
   mockOrganization,
@@ -87,73 +89,76 @@ async function writeLocalFileDb(data: LocalDbSchema): Promise<void> {
 }
 
 // ----------------------------------------------------------------
-// Prisma Health Check (with caching so we don't block every request)
+// Supabase Client (Server-Side with Service Role Key or Anon Key)
 // ----------------------------------------------------------------
 
-let isPrismaConnected: boolean | null = null;
-let lastCheckTime = 0;
-const CHECK_INTERVAL_MS = 15000; // Check DB reachability every 15s
+let _supabase: SupabaseClient | null = null;
+let _supabaseAvailable: boolean | null = null;
+let _supabaseLastCheck = 0;
+const SUPABASE_CHECK_INTERVAL_MS = 30000;
 
-async function checkPrismaAvailability(): Promise<boolean> {
-  const dbUrl = process.env.DATABASE_URL;
-  // If no DB URL is configured or it points to an unconfigured localhost placeholder, skip Prisma immediately
-  if (!dbUrl || dbUrl.includes('localhost:5432') || dbUrl.includes('postgres:postgres@localhost')) {
+function getSupabaseClient(): SupabaseClient | null {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url || !serviceKey) return null;
+  if (url.includes('your-project') || serviceKey.length < 20) return null;
+
+  if (!_supabase) {
+    _supabase = createClient(url, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+  return _supabase;
+}
+
+async function checkSupabaseAvailability(): Promise<boolean> {
+  const client = getSupabaseClient();
+  if (!client) {
     return false;
   }
 
   const now = Date.now();
-  if (isPrismaConnected !== null && now - lastCheckTime < CHECK_INTERVAL_MS) {
-    return isPrismaConnected;
+  if (_supabaseAvailable !== null && now - _supabaseLastCheck < SUPABASE_CHECK_INTERVAL_MS) {
+    return _supabaseAvailable;
   }
 
-  // Quick connectivity check with a 2-second timeout
   try {
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Prisma connection timeout')), 2000)
-    );
-    const queryPromise = prisma.$queryRaw`SELECT 1`;
-    await Promise.race([queryPromise, timeoutPromise]);
-
-    isPrismaConnected = true;
-    lastCheckTime = now;
-    return true;
-  } catch {
-    isPrismaConnected = false;
-    lastCheckTime = now;
-    return false;
+    const { error } = await client.from('organizations').select('id').limit(1);
+    if (error && error.code !== 'PGRST116') {
+      console.warn('[server-db] Supabase health check failed:', error.message);
+      _supabaseAvailable = false;
+    } else {
+      _supabaseAvailable = true;
+    }
+  } catch (err) {
+    console.warn('[server-db] Supabase unreachable:', err);
+    _supabaseAvailable = false;
   }
+
+  _supabaseLastCheck = now;
+  return _supabaseAvailable ?? false;
 }
 
 // ----------------------------------------------------------------
-// Prisma Row Mappers
+// Row Mappers (Prisma schema in Supabase uses camelCase columns)
 // ----------------------------------------------------------------
 
-type PrismaAspectRatio = 'SQUARE_1_1' | 'PORTRAIT_4_5' | 'STORY_9_16' | 'LANDSCAPE_16_9';
-
-function toDbAspectRatio(ar: string): PrismaAspectRatio {
-  const map: Record<string, PrismaAspectRatio> = {
-    '1:1': 'SQUARE_1_1',
-    '4:5': 'PORTRAIT_4_5',
-    '9:16': 'STORY_9_16',
-    '16:9': 'LANDSCAPE_16_9',
-    'SQUARE_1_1': 'SQUARE_1_1',
-    'PORTRAIT_4_5': 'PORTRAIT_4_5',
-    'STORY_9_16': 'STORY_9_16',
-    'LANDSCAPE_16_9': 'LANDSCAPE_16_9',
+function toDbAspectRatio(ar: string): string {
+  const map: Record<string, string> = {
+    '1:1': 'SQUARE_1_1', '4:5': 'PORTRAIT_4_5',
+    '9:16': 'STORY_9_16', '16:9': 'LANDSCAPE_16_9',
+    'SQUARE_1_1': 'SQUARE_1_1', 'PORTRAIT_4_5': 'PORTRAIT_4_5',
+    'STORY_9_16': 'STORY_9_16', 'LANDSCAPE_16_9': 'LANDSCAPE_16_9',
   };
   return map[ar] ?? 'SQUARE_1_1';
 }
 
 function fromDbAspectRatio(ar: string): ScheduledPost['aspectRatio'] {
   const map: Record<string, ScheduledPost['aspectRatio']> = {
-    'SQUARE_1_1': '1:1',
-    'PORTRAIT_4_5': '4:5',
-    'STORY_9_16': '9:16',
-    'LANDSCAPE_16_9': '16:9',
-    '1:1': '1:1',
-    '4:5': '4:5',
-    '9:16': '9:16',
-    '16:9': '16:9',
+    'SQUARE_1_1': '1:1', 'PORTRAIT_4_5': '4:5',
+    'STORY_9_16': '9:16', 'LANDSCAPE_16_9': '16:9',
+    '1:1': '1:1', '4:5': '4:5', '9:16': '9:16', '16:9': '16:9',
   };
   return map[ar] ?? '1:1';
 }
@@ -171,7 +176,7 @@ function mapOrg(row: any): Organization {
   };
 }
 
-function mapSub(row: any): Subsidiary {
+function mapSub(row: any, accountCount = 0): Subsidiary {
   return {
     id: row.id,
     organizationId: row.organizationId,
@@ -186,7 +191,7 @@ function mapSub(row: any): Subsidiary {
     logoUrl: row.logoUrl ?? '',
     websiteUrl: row.websiteUrl ?? '',
     targetAudience: row.targetAudience ?? '',
-    activeAccountsCount: row._count?.socialAccounts ?? 0,
+    activeAccountsCount: accountCount,
   };
 }
 
@@ -198,9 +203,9 @@ function mapAccount(row: any): SocialAccount {
     accountHandle: row.accountHandle,
     accountName: row.accountName,
     avatarUrl: row.avatarUrl ?? '',
-    followersCount: row.followersCount,
+    followersCount: row.followersCount ?? 0,
     connectionStatus: row.connectionStatus as SocialAccount['connectionStatus'],
-    lastSyncedAt: row.lastSyncedAt instanceof Date ? row.lastSyncedAt.toISOString() : String(row.lastSyncedAt),
+    lastSyncedAt: row.lastSyncedAt ?? new Date().toISOString(),
   };
 }
 
@@ -213,112 +218,124 @@ function mapPost(row: any): ScheduledPost {
     prompt: row.prompt,
     enhancedPrompt: row.enhancedPrompt ?? undefined,
     imageUrl: row.imageUrl,
-    aspectRatio: fromDbAspectRatio(row.aspectRatio),
+    aspectRatio: fromDbAspectRatio(row.aspectRatio ?? 'SQUARE_1_1'),
     caption: row.caption,
     hashtags: row.hashtags || [],
     status: row.status as ScheduledPost['status'],
-    modelName: row.modelName as ScheduledPost['modelName'],
-    scheduledTime: row.scheduledTime ? new Date(row.scheduledTime).toISOString() : undefined,
-    publishedTime: row.publishedTime ? new Date(row.publishedTime).toISOString() : undefined,
+    modelName: (row.modelName ?? 'Flux.1-Pro') as ScheduledPost['modelName'],
+    scheduledTime: row.scheduledTime ?? undefined,
+    publishedTime: row.publishedTime ?? undefined,
     rejectionFeedback: row.rejectionFeedback ?? undefined,
     metricsLikes: row.metricsLikes ?? 0,
     metricsComments: row.metricsComments ?? 0,
     metricsShares: row.metricsShares ?? 0,
     metricsImpressions: row.metricsImpressions ?? 0,
-    createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
-    updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.createdAt),
+    createdAt: row.createdAt ?? new Date().toISOString(),
+    updatedAt: row.updatedAt ?? new Date().toISOString(),
   };
 }
 
 // ----------------------------------------------------------------
-// Auto-Seed Helper for PostgreSQL
+// Supabase Seed Helper
 // ----------------------------------------------------------------
-async function ensurePrismaSeeded() {
+
+async function ensureSupabaseSeeded(sb: SupabaseClient): Promise<void> {
   try {
-    const count = await prisma.organization.count();
-    if (count === 0) {
-      await seedPrismaDatabase();
+    const { count } = await sb.from('organizations').select('*', { count: 'exact', head: true });
+    if ((count ?? 0) === 0) {
+      await seedSupabaseDatabase(sb);
     }
   } catch (err) {
-    console.warn('[server-db] Prisma seed check failed:', err);
+    console.warn('[server-db] Supabase seed check failed:', err);
   }
 }
 
-export async function seedPrismaDatabase(): Promise<void> {
-  const org = await prisma.organization.upsert({
-    where: { id: mockOrganization.id },
-    create: {
-      id: mockOrganization.id,
-      name: mockOrganization.name,
-      slug: mockOrganization.slug,
-      plan: mockOrganization.plan as any,
-      replicateApiKey: mockOrganization.replicateApiKey ?? null,
-      openaiApiKey: mockOrganization.openaiApiKey ?? null,
-      ayrshareApiKey: mockOrganization.ayrshareApiKey ?? null,
-      bufferToken: mockOrganization.bufferToken ?? null,
-    },
-    update: {},
-  });
+async function seedSupabaseDatabase(sb: SupabaseClient): Promise<void> {
+  console.log('[server-db] Seeding Supabase with initial data...');
 
-  for (const sub of mockSubsidiaries) {
-    await prisma.subsidiary.upsert({
-      where: { id: sub.id },
-      create: {
-        id: sub.id,
-        organizationId: org.id,
-        name: sub.name,
-        slug: sub.slug,
-        tagline: sub.tagline ?? null,
-        brandTone: sub.brandTone,
-        toneKeywords: sub.toneKeywords,
-        primaryColor: sub.primaryColor,
-        secondaryColor: sub.secondaryColor,
-        accentColor: sub.accentColor ?? null,
-        logoUrl: sub.logoUrl,
-        websiteUrl: sub.websiteUrl ?? null,
-        targetAudience: sub.targetAudience ?? null,
-      },
-      update: {},
-    });
+  let localData: LocalDbSchema;
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      const content = await fs.promises.readFile(DB_FILE, 'utf-8');
+      localData = JSON.parse(content) as LocalDbSchema;
+    } else {
+      localData = getInitialLocalData();
+    }
+  } catch {
+    localData = getInitialLocalData();
   }
 
-  for (const account of mockSocialAccounts) {
-    await prisma.socialAccount.upsert({
-      where: {
-        subsidiaryId_platform: {
-          subsidiaryId: account.subsidiaryId,
-          platform: account.platform as any,
-        },
-      },
-      create: {
-        id: account.id,
-        subsidiaryId: account.subsidiaryId,
-        platform: account.platform as any,
-        accountHandle: account.accountHandle,
-        accountName: account.accountName,
-        avatarUrl: account.avatarUrl ?? null,
-        followersCount: account.followersCount,
-        connectionStatus: account.connectionStatus as any,
-        lastSyncedAt: account.lastSyncedAt ? new Date(account.lastSyncedAt) : new Date(),
-      },
-      update: {},
-    });
+  const org = localData.organization;
+
+  // Upsert organization
+  const { error: orgErr } = await sb.from('organizations').upsert({
+    id: org.id,
+    name: org.name,
+    slug: org.slug,
+    plan: org.plan,
+    replicateApiKey: org.replicateApiKey ?? null,
+    openaiApiKey: org.openaiApiKey ?? null,
+    ayrshareApiKey: org.ayrshareApiKey ?? null,
+    bufferToken: org.bufferToken ?? null,
+    updatedAt: new Date().toISOString(),
+  }, { onConflict: 'id' });
+  if (orgErr) console.warn('[server-db] Org upsert error:', orgErr.message);
+
+  // Upsert subsidiaries
+  for (const sub of localData.subsidiaries) {
+    const { error: subErr } = await sb.from('subsidiaries').upsert({
+      id: sub.id,
+      organizationId: org.id,
+      name: sub.name,
+      slug: sub.slug,
+      tagline: sub.tagline ?? null,
+      brandTone: sub.brandTone,
+      toneKeywords: sub.toneKeywords,
+      primaryColor: sub.primaryColor,
+      secondaryColor: sub.secondaryColor,
+      accentColor: sub.accentColor ?? null,
+      logoUrl: sub.logoUrl ?? '',
+      websiteUrl: sub.websiteUrl ?? null,
+      targetAudience: sub.targetAudience ?? null,
+      updatedAt: new Date().toISOString(),
+    }, { onConflict: 'id' });
+    if (subErr) console.warn('[server-db] Sub upsert error:', subErr.message);
   }
+
+  // Upsert social accounts
+  for (const acc of localData.socialAccounts) {
+    const { error: accErr } = await sb.from('social_accounts').upsert({
+      id: acc.id,
+      subsidiaryId: acc.subsidiaryId,
+      platform: acc.platform,
+      accountHandle: acc.accountHandle,
+      accountName: acc.accountName,
+      avatarUrl: acc.avatarUrl ?? null,
+      followersCount: acc.followersCount,
+      connectionStatus: acc.connectionStatus,
+      lastSyncedAt: acc.lastSyncedAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }, { onConflict: 'id' });
+    if (accErr) console.warn('[server-db] Account upsert error:', accErr.message);
+  }
+
+  console.log('[server-db] ✅ Supabase seeded successfully');
 }
 
 // ----------------------------------------------------------------
-// Public Database API (Hybrid PostgreSQL + Local File Fallback)
+// Public Database API (Hybrid Supabase + Local File Fallback)
 // ----------------------------------------------------------------
 
 export async function getDbOrganization(): Promise<Organization> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      await ensurePrismaSeeded();
-      const row = await prisma.organization.findFirst();
-      if (row) return mapOrg(row);
+      await ensureSupabaseSeeded(sb);
+      const { data, error } = await sb.from('organizations').select('*').limit(1).single();
+      if (!error && data) return mapOrg(data);
     } catch (e) {
-      console.warn('[server-db] Prisma query failed, using local fallback:', e);
+      console.warn('[server-db] Supabase org query failed, using local fallback:', e);
     }
   }
 
@@ -327,28 +344,26 @@ export async function getDbOrganization(): Promise<Organization> {
 }
 
 export async function updateDbOrganization(updates: Partial<Organization>): Promise<Organization> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      await ensurePrismaSeeded();
-      const existing = await prisma.organization.findFirst();
+      const { data: existing } = await sb.from('organizations').select('*').limit(1).single();
       if (existing) {
-        const updated = await prisma.organization.update({
-          where: { id: existing.id },
-          data: {
-            name: updates.name ?? existing.name,
-            slug: updates.slug ?? existing.slug,
-            plan: (updates.plan ?? existing.plan) as any,
-            replicateApiKey: updates.replicateApiKey ?? existing.replicateApiKey,
-            openaiApiKey: updates.openaiApiKey ?? existing.openaiApiKey,
-            ayrshareApiKey: updates.ayrshareApiKey ?? existing.ayrshareApiKey,
-            bufferToken: updates.bufferToken ?? existing.bufferToken,
-          },
-        });
-        return mapOrg(updated);
+        const { data, error } = await sb.from('organizations').update({
+          name: updates.name ?? existing.name,
+          slug: updates.slug ?? existing.slug,
+          plan: updates.plan ?? existing.plan,
+          replicateApiKey: updates.replicateApiKey ?? existing.replicateApiKey,
+          openaiApiKey: updates.openaiApiKey ?? existing.openaiApiKey,
+          ayrshareApiKey: updates.ayrshareApiKey ?? existing.ayrshareApiKey,
+          bufferToken: updates.bufferToken ?? existing.bufferToken,
+          updatedAt: new Date().toISOString(),
+        }).eq('id', existing.id).select().single();
+        if (!error && data) return mapOrg(data);
       }
     } catch (e) {
-      console.warn('[server-db] Prisma update failed, using local fallback:', e);
+      console.warn('[server-db] Supabase org update failed, using local fallback:', e);
     }
   }
 
@@ -359,17 +374,22 @@ export async function updateDbOrganization(updates: Partial<Organization>): Prom
 }
 
 export async function getDbSubsidiaries(): Promise<Subsidiary[]> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      await ensurePrismaSeeded();
-      const rows = await prisma.subsidiary.findMany({
-        include: { _count: { select: { socialAccounts: true } } },
-        orderBy: { createdAt: 'asc' },
-      });
-      if (rows.length > 0) return rows.map(mapSub);
+      await ensureSupabaseSeeded(sb);
+      const { data, error } = await sb.from('subsidiaries').select('*').order('createdAt', { ascending: true });
+      if (!error && data && data.length > 0) {
+        const { data: accounts } = await sb.from('social_accounts').select('subsidiaryId');
+        const countMap: Record<string, number> = {};
+        (accounts ?? []).forEach((a: any) => {
+          countMap[a.subsidiaryId] = (countMap[a.subsidiaryId] ?? 0) + 1;
+        });
+        return data.map((row: any) => mapSub(row, countMap[row.id] ?? 0));
+      }
     } catch (e) {
-      console.warn('[server-db] Prisma query failed, using local fallback:', e);
+      console.warn('[server-db] Supabase subsidiaries query failed, using local fallback:', e);
     }
   }
 
@@ -378,34 +398,29 @@ export async function getDbSubsidiaries(): Promise<Subsidiary[]> {
 }
 
 export async function updateDbSubsidiary(updated: Subsidiary): Promise<Subsidiary> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      const existing = await prisma.subsidiary.findUnique({ where: { id: updated.id } });
-      if (existing) {
-        const row = await prisma.subsidiary.update({
-          where: { id: updated.id },
-          data: {
-            name: updated.name,
-            slug: updated.slug,
-            tagline: updated.tagline ?? null,
-            brandTone: updated.brandTone,
-            toneKeywords: updated.toneKeywords,
-            primaryColor: updated.primaryColor,
-            secondaryColor: updated.secondaryColor,
-            accentColor: updated.accentColor ?? null,
-            logoUrl: updated.logoUrl ?? '',
-            websiteUrl: updated.websiteUrl ?? null,
-            targetAudience: updated.targetAudience ?? null,
-          },
-          include: { _count: { select: { socialAccounts: true } } },
-        });
-        return mapSub(row);
-      } else {
-        return addDbSubsidiary(updated);
-      }
+      const { data, error } = await sb.from('subsidiaries').upsert({
+        id: updated.id,
+        organizationId: updated.organizationId,
+        name: updated.name,
+        slug: updated.slug,
+        tagline: updated.tagline ?? null,
+        brandTone: updated.brandTone,
+        toneKeywords: updated.toneKeywords,
+        primaryColor: updated.primaryColor,
+        secondaryColor: updated.secondaryColor,
+        accentColor: updated.accentColor ?? null,
+        logoUrl: updated.logoUrl ?? '',
+        websiteUrl: updated.websiteUrl ?? null,
+        targetAudience: updated.targetAudience ?? null,
+        updatedAt: new Date().toISOString(),
+      }, { onConflict: 'id' }).select().single();
+      if (!error && data) return mapSub(data, updated.activeAccountsCount ?? 0);
     } catch (e) {
-      console.warn('[server-db] Prisma update subsidiary failed, saving to local fallback:', e);
+      console.warn('[server-db] Supabase subsidiary update failed, using local fallback:', e);
     }
   }
 
@@ -421,48 +436,31 @@ export async function updateDbSubsidiary(updated: Subsidiary): Promise<Subsidiar
 }
 
 export async function addDbSubsidiary(newSub: Subsidiary): Promise<Subsidiary> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      await ensurePrismaSeeded();
-      const org = await prisma.organization.findFirst();
-      if (org) {
-        const row = await prisma.subsidiary.upsert({
-          where: { id: newSub.id },
-          create: {
-            id: newSub.id,
-            organizationId: org.id,
-            name: newSub.name,
-            slug: newSub.slug,
-            tagline: newSub.tagline ?? null,
-            brandTone: newSub.brandTone,
-            toneKeywords: newSub.toneKeywords,
-            primaryColor: newSub.primaryColor,
-            secondaryColor: newSub.secondaryColor,
-            accentColor: newSub.accentColor ?? null,
-            logoUrl: newSub.logoUrl ?? '',
-            websiteUrl: newSub.websiteUrl ?? null,
-            targetAudience: newSub.targetAudience ?? null,
-          },
-          update: {
-            name: newSub.name,
-            slug: newSub.slug,
-            tagline: newSub.tagline ?? null,
-            brandTone: newSub.brandTone,
-            toneKeywords: newSub.toneKeywords,
-            primaryColor: newSub.primaryColor,
-            secondaryColor: newSub.secondaryColor,
-            accentColor: newSub.accentColor ?? null,
-            logoUrl: newSub.logoUrl ?? '',
-            websiteUrl: newSub.websiteUrl ?? null,
-            targetAudience: newSub.targetAudience ?? null,
-          },
-          include: { _count: { select: { socialAccounts: true } } },
-        });
-        return mapSub(row);
-      }
+      const { data: org } = await sb.from('organizations').select('id').limit(1).single();
+      const orgId = org?.id ?? newSub.organizationId;
+      const { data, error } = await sb.from('subsidiaries').upsert({
+        id: newSub.id,
+        organizationId: orgId,
+        name: newSub.name,
+        slug: newSub.slug,
+        tagline: newSub.tagline ?? null,
+        brandTone: newSub.brandTone,
+        toneKeywords: newSub.toneKeywords,
+        primaryColor: newSub.primaryColor,
+        secondaryColor: newSub.secondaryColor,
+        accentColor: newSub.accentColor ?? null,
+        logoUrl: newSub.logoUrl ?? '',
+        websiteUrl: newSub.websiteUrl ?? null,
+        targetAudience: newSub.targetAudience ?? null,
+        updatedAt: new Date().toISOString(),
+      }, { onConflict: 'id' }).select().single();
+      if (!error && data) return mapSub(data);
     } catch (e) {
-      console.warn('[server-db] Prisma add subsidiary failed, saving to local fallback:', e);
+      console.warn('[server-db] Supabase add subsidiary failed, saving to local fallback:', e);
     }
   }
 
@@ -479,13 +477,14 @@ export async function addDbSubsidiary(newSub: Subsidiary): Promise<Subsidiary> {
 }
 
 export async function deleteDbSubsidiary(id: string): Promise<boolean> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      await prisma.subsidiary.delete({ where: { id } });
-      return true;
+      const { error } = await sb.from('subsidiaries').delete().eq('id', id);
+      if (!error) return true;
     } catch {
-      // Continue to local cleanup
+      // fall through to local
     }
   }
 
@@ -499,39 +498,25 @@ export async function deleteDbSubsidiary(id: string): Promise<boolean> {
 }
 
 export async function updateDbSocialAccount(account: SocialAccount): Promise<SocialAccount> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      const row = await prisma.socialAccount.upsert({
-        where: {
-          subsidiaryId_platform: {
-            subsidiaryId: account.subsidiaryId,
-            platform: account.platform as any,
-          },
-        },
-        create: {
-          id: account.id,
-          subsidiaryId: account.subsidiaryId,
-          platform: account.platform as any,
-          accountHandle: account.accountHandle,
-          accountName: account.accountName,
-          avatarUrl: account.avatarUrl ?? null,
-          followersCount: account.followersCount,
-          connectionStatus: account.connectionStatus as any,
-          lastSyncedAt: account.lastSyncedAt ? new Date(account.lastSyncedAt) : new Date(),
-        },
-        update: {
-          accountHandle: account.accountHandle,
-          accountName: account.accountName,
-          avatarUrl: account.avatarUrl ?? null,
-          followersCount: account.followersCount,
-          connectionStatus: account.connectionStatus as any,
-          lastSyncedAt: account.lastSyncedAt ? new Date(account.lastSyncedAt) : new Date(),
-        },
-      });
-      return mapAccount(row);
+      const { data, error } = await sb.from('social_accounts').upsert({
+        id: account.id,
+        subsidiaryId: account.subsidiaryId,
+        platform: account.platform,
+        accountHandle: account.accountHandle,
+        accountName: account.accountName,
+        avatarUrl: account.avatarUrl ?? null,
+        followersCount: account.followersCount,
+        connectionStatus: account.connectionStatus,
+        lastSyncedAt: account.lastSyncedAt ?? new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }, { onConflict: 'id' }).select().single();
+      if (!error && data) return mapAccount(data);
     } catch (e) {
-      console.warn('[server-db] Prisma social account update failed, using local fallback:', e);
+      console.warn('[server-db] Supabase social account update failed, using local fallback:', e);
     }
   }
 
@@ -549,15 +534,14 @@ export async function updateDbSocialAccount(account: SocialAccount): Promise<Soc
 }
 
 export async function getDbPosts(): Promise<ScheduledPost[]> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      const rows = await prisma.scheduledPost.findMany({
-        orderBy: { createdAt: 'desc' },
-      });
-      if (rows.length > 0) return rows.map(mapPost);
+      const { data, error } = await sb.from('scheduled_posts').select('*').order('createdAt', { ascending: false });
+      if (!error && data && data.length > 0) return data.map(mapPost);
     } catch (e) {
-      console.warn('[server-db] Prisma posts query failed, using local fallback:', e);
+      console.warn('[server-db] Supabase posts query failed, using local fallback:', e);
     }
   }
 
@@ -566,35 +550,35 @@ export async function getDbPosts(): Promise<ScheduledPost[]> {
 }
 
 export async function addDbPost(newPost: ScheduledPost): Promise<ScheduledPost> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      const row = await prisma.scheduledPost.create({
-        data: {
-          id: newPost.id,
-          subsidiaryId: newPost.subsidiaryId,
-          socialAccountId: newPost.socialAccountId ?? null,
-          platform: newPost.platform as any,
-          prompt: newPost.prompt,
-          enhancedPrompt: newPost.enhancedPrompt ?? null,
-          imageUrl: newPost.imageUrl,
-          aspectRatio: toDbAspectRatio(newPost.aspectRatio ?? '1:1'),
-          caption: newPost.caption,
-          hashtags: newPost.hashtags,
-          status: (newPost.status ?? 'DRAFT') as any,
-          modelName: newPost.modelName ?? 'Flux.1-Pro',
-          scheduledTime: newPost.scheduledTime ? new Date(newPost.scheduledTime) : null,
-          publishedTime: newPost.publishedTime ? new Date(newPost.publishedTime) : null,
-          rejectionFeedback: newPost.rejectionFeedback ?? null,
-          metricsLikes: newPost.metricsLikes ?? 0,
-          metricsComments: newPost.metricsComments ?? 0,
-          metricsShares: newPost.metricsShares ?? 0,
-          metricsImpressions: newPost.metricsImpressions ?? 0,
-        },
-      });
-      return mapPost(row);
+      const { data, error } = await sb.from('scheduled_posts').insert({
+        id: newPost.id,
+        subsidiaryId: newPost.subsidiaryId,
+        socialAccountId: newPost.socialAccountId ?? null,
+        platform: newPost.platform,
+        prompt: newPost.prompt,
+        enhancedPrompt: newPost.enhancedPrompt ?? null,
+        imageUrl: newPost.imageUrl,
+        aspectRatio: toDbAspectRatio(newPost.aspectRatio ?? '1:1'),
+        caption: newPost.caption,
+        hashtags: newPost.hashtags,
+        status: newPost.status ?? 'DRAFT',
+        modelName: newPost.modelName ?? 'Flux.1-Pro',
+        scheduledTime: newPost.scheduledTime ?? null,
+        publishedTime: newPost.publishedTime ?? null,
+        rejectionFeedback: newPost.rejectionFeedback ?? null,
+        metricsLikes: newPost.metricsLikes ?? 0,
+        metricsComments: newPost.metricsComments ?? 0,
+        metricsShares: newPost.metricsShares ?? 0,
+        metricsImpressions: newPost.metricsImpressions ?? 0,
+        updatedAt: new Date().toISOString(),
+      }).select().single();
+      if (!error && data) return mapPost(data);
     } catch (e) {
-      console.warn('[server-db] Prisma add post failed, saving to local fallback:', e);
+      console.warn('[server-db] Supabase add post failed, saving to local fallback:', e);
     }
   }
 
@@ -605,13 +589,14 @@ export async function addDbPost(newPost: ScheduledPost): Promise<ScheduledPost> 
 }
 
 export async function deleteDbPost(id: string): Promise<boolean> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      await prisma.scheduledPost.delete({ where: { id } });
-      return true;
+      const { error } = await sb.from('scheduled_posts').delete().eq('id', id);
+      if (!error) return true;
     } catch {
-      // Continue to local cleanup
+      // fall through
     }
   }
 
@@ -623,21 +608,29 @@ export async function deleteDbPost(id: string): Promise<boolean> {
 }
 
 export async function resetDbToDefaults(): Promise<void> {
-  const usePrisma = await checkPrismaAvailability();
-  if (usePrisma) {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    const sb = getSupabaseClient()!;
     try {
-      await prisma.scheduledPost.deleteMany();
-      await prisma.socialAccount.deleteMany();
-      await prisma.subsidiary.deleteMany();
-      await prisma.organization.deleteMany();
-      await seedPrismaDatabase();
+      await sb.from('scheduled_posts').delete().neq('id', '');
+      await sb.from('social_accounts').delete().neq('id', '');
+      await sb.from('subsidiaries').delete().neq('id', '');
+      await sb.from('organizations').delete().neq('id', '');
+      await seedSupabaseDatabase(sb);
     } catch {
-      // Ignore
+      // ignore
     }
   }
 
   const initial = getInitialLocalData();
   await writeLocalFileDb(initial);
+}
+
+export async function seedPrismaDatabase(): Promise<void> {
+  const useSupabase = await checkSupabaseAvailability();
+  if (useSupabase) {
+    await seedSupabaseDatabase(getSupabaseClient()!);
+  }
 }
 
 export async function readDatabase() {
