@@ -223,37 +223,21 @@ interface StudioState {
 }
 
 export const useStudioStore = create<StudioState>((set, get) => {
-  const initialLocal = typeof window !== 'undefined' ? loadSavedState() : {};
-  const initialSubs =
-    initialLocal.subsidiaries && initialLocal.subsidiaries.length > 0
-      ? initialLocal.subsidiaries
-      : mockSubsidiaries;
-  const initialOrg = initialLocal.organization || mockOrganization;
-  const initialSelected =
-    initialLocal.selectedSubsidiary && initialSubs.some((s) => s.id === initialLocal.selectedSubsidiary?.id)
-      ? initialLocal.selectedSubsidiary
-      : initialSubs[0];
-  const initialAccounts = initialLocal.socialAccounts || mockSocialAccounts;
-  const initialPosts = initialLocal.posts || mockPosts;
-
   return {
-    organization: initialOrg,
-    subsidiaries: initialSubs,
-    selectedSubsidiary: initialSelected,
+    organization: mockOrganization,
+    subsidiaries: mockSubsidiaries,
+    selectedSubsidiary: mockSubsidiaries[0],
     editingSubsidiary: null,
     isEditSubsidiaryModalOpen: false,
     isEditOrgModalOpen: false,
 
-    socialAccounts: initialAccounts,
+    socialAccounts: mockSocialAccounts,
     isConnectAccountModalOpen: false,
     connectingPlatform: null,
 
     currentStep: 1,
     activeTab: 'studio',
-    theme:
-      typeof window !== 'undefined' && localStorage.getItem('omnibrand_theme') === 'dark'
-        ? 'dark'
-        : 'light',
+    theme: 'light',
     isSettingsOpen: false,
 
     selectedPlatform: 'INSTAGRAM',
@@ -281,7 +265,7 @@ export const useStudioStore = create<StudioState>((set, get) => {
     lastPublishedPostId: null,
     lastDispatchResult: null,
 
-    posts: initialPosts,
+    posts: mockPosts,
     filterStatus: 'ALL',
     filterPlatform: 'ALL',
     filterBrandId: 'ALL',

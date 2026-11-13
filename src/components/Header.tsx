@@ -56,12 +56,12 @@ export const Header: React.FC = () => {
                   title="Click to rename parent company"
                 >
                   <Building2 className="w-3 h-3 text-slate-400 group-hover:text-indigo-500" />
-                  <span className="font-medium truncate max-w-[140px] sm:max-w-[190px]">
+                  <span suppressHydrationWarning className="font-medium truncate max-w-[140px] sm:max-w-[190px]">
                     {organization.name}
                   </span>
                   <Pencil className="w-2.5 h-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
                   <span className="inline-block w-1 h-1 rounded-full bg-emerald-500" />
-                  <span className="text-[10px] text-emerald-500 font-semibold">{organization.plan}</span>
+                  <span suppressHydrationWarning className="text-[10px] text-emerald-500 font-semibold">{organization.plan}</span>
                 </button>
               </div>
             </div>
@@ -71,6 +71,7 @@ export const Header: React.FC = () => {
               <span className="text-xs text-slate-400 mr-2 font-medium">Brand:</span>
               <div className="relative">
                 <select
+                  suppressHydrationWarning
                   value={selectedSubsidiary.id}
                   onChange={(e) => {
                     const found = subsidiaries.find((s) => s.id === e.target.value);

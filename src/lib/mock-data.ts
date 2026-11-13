@@ -2,22 +2,22 @@ import { Organization, Subsidiary, SocialAccount, ScheduledPost } from '@/types'
 
 export const mockOrganization: Organization = {
   id: 'org-vanguard-01',
-  name: 'Vanguard Media Group Holdings',
-  slug: 'vanguard-media',
+  name: 'Techbridge',
+  slug: 'techbridge',
   plan: 'ENTERPRISE',
-  replicateApiKey: 'r8_demo_replicate_token_active',
-  openaiApiKey: 'sk-proj-demo_openai_token_active',
-  ayrshareApiKey: 'AYR_PRO_DEMO_KEY_9824',
-  bufferToken: 'buff_access_token_v4_live',
+  replicateApiKey: '',
+  openaiApiKey: '',
+  ayrshareApiKey: '',
+  bufferToken: '',
 };
 
 export const mockSubsidiaries: Subsidiary[] = [
   {
     id: 'sub-lumina',
     organizationId: 'org-vanguard-01',
-    name: 'Lumina Creative Labs',
-    slug: 'lumina-creative',
-    tagline: 'Generative AI-driven design studio pushing the boundaries of digital expression',
+    name: 'Lumina Innovations',
+    slug: 'lumina-innovations',
+    tagline: 'Next-Gen AI Hardware',
     brandTone: 'Visionary, Avant-Garde & High-Tech Minimalist',
     toneKeywords: ['innovative', 'cinematic lighting', 'hyper-minimalist', 'vibrant neon', 'futuristic architecture', 'photorealistic 8k'],
     primaryColor: '#6366F1', // Indigo
